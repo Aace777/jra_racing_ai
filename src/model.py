@@ -1,84 +1,159 @@
 import pandas as pd
+import numpy as np
 import lightgbm as lgb
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score, log_loss
+from sklearn.model_selection import GroupKFold
+import optuna
+
+# Optunaのログがうるさくならないように調整
+optuna.logging.set_verbosity(optuna.logging.WARNING)
 
 class JraModel:
-    """
-    LightGBMを使用してJRAのレース結果（勝敗や着順）を予測するモデルクラス。
-    """
-    def __init__(self):
-        self.model = None
-        # 予測モデルの訓練に使う特徴量（カラム名）のリスト
-        # 特徴量として使用するカラムの定義をこれに合わせる
-        self.feature_cols = [
-            'odds',
-            'weight',
-            'past_avg_rank',
-            'days_since_last_race',
-            'odds_zscore',
-            'weight_diff_from_avg',
-            'past_rank_in_race'
-        ]
-
-    def train(self, df: pd.DataFrame):
+    def __init__(self, params=None):
         """
-        特徴量データフレームを受け取り、モデルを学習させる
+        LightGBM モデルクラス（クロスバリデーション & Optuna対応）
         """
-        # 目的変数（正解）の作成：今回は「1着になったかどうか（1 or 0）」を予測のターゲットにする例
-        df = df.copy()
-        if 'finish_order' in df.columns:
-            df['target'] = df['finish_order'].apply(lambda x: 1 if x == 1 else 0)
-        else:
-            raise ValueError("データに 'finish_order' 列が含まれていません。")
-
-        # 欠損値の除外など
-        train_df = df.dropna(subset=self.feature_cols + ['target'])
-
-        X = train_df[self.feature_cols]
-        y = train_df['target']
-
-        # 訓練データと検証データに分割（モックが少ない場合はそのまま学習することも考慮）
-        if len(train_df) >= 4:
-            X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.25, random_state=42)
-        else:
-            # データが少なすぎるモックテスト用のフォールバック
-            X_train, X_val, y_train, y_val = X, X, y, y
-
-        # LightGBMのデータセット作成
-        lgb_train = lgb.Dataset(X_train, y_train)
-        lgb_eval = lgb.Dataset(X_val, y_val, reference=lgb_train)
-
-        # ハイパーパラメータの設定
-        # ハイパーパラメータの設定
-        params = {
-            'objective': 'binary',      # 二値分類（勝つか負けるか）
+        self.models = []
+        self.params = params if params is not None else {
+            'objective': 'binary',
             'metric': 'binary_logloss',
             'boosting_type': 'gbdt',
-            'random_state': 42,
+            'learning_rate': 0.05,
+            'num_leaves': 15,
+            'max_depth': 4,
+            'feature_fraction': 0.8,
+            'seed': 42,
             'verbose': -1
         }
 
-        print("🚀 LightGBMモデルの学習を開始します...")
-        self.model = lgb.train(
-            params,
-            lgb_train,
-            num_boost_round=100,
-            valid_sets=[lgb_eval],
-            callbacks=[lgb.early_stopping(stopping_rounds=10, verbose=False)]
-        )
-        print("✅ モデルの学習が完了しました！")
+    def optimize_hyperparameters(self, df: pd.DataFrame, feature_cols: list, n_trials=20):
+        """
+        Optunaを用いて過学習を防ぎながら最適なハイパーパラメータを探索する
+        """
+        print(f"🔬 Optunaによるハイパーパラメータ自動最適化を開始します（試行回数: {n_trials}回）...")
+        
+        X = df[feature_cols]
+        # 的中（1着）を予測するため、finish_order == 1 または target をターゲットにする
+        if 'target' in df.columns:
+            y = df['target']
+        elif 'finish_order' in df.columns:
+            y = (df['finish_order'] == 1).astype(int)
+        else:
+            raise ValueError("目的変数となる列（target または finish_order）が見つかりません。")
+            
+        groups = df['race_id'] if 'race_id' in df.columns else np.arange(len(df))
 
-    def predict(self, df: pd.DataFrame) -> pd.DataFrame:
+        def objective(trial):
+            # 探索するパラメータ空間
+            param = {
+                'objective': 'binary',
+                'metric': 'binary_logloss',
+                'boosting_type': 'gbdt',
+                'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.2, log=True),
+                'num_leaves': trial.suggest_int('num_leaves', 8, 31),
+                'max_depth': trial.suggest_int('max_depth', 3, 7),
+                'feature_fraction': trial.suggest_float('feature_fraction', 0.6, 1.0),
+                'min_child_samples': trial.suggest_int('min_child_samples', 5, 20),
+                'seed': 42,
+                'verbose': -1
+            }
+
+            # レース単位のグループクロスバリデーション（GroupKFold）で汎用性を評価
+            gkf = GroupKFold(n_splits=3)
+            scores = []
+
+            for train_idx, val_idx in gkf.split(X, y, groups):
+                X_train, X_val = X.iloc[train_idx], X.iloc[val_idx]
+                y_train, y_val = y.iloc[train_idx], y.iloc[val_idx]
+
+                train_data = lgb.Dataset(X_train, label=y_train)
+                val_data = lgb.Dataset(X_val, label=y_val, reference=train_data)
+
+                model = lgb.train(
+                    param,
+                    train_data,
+                    num_boost_round=200,
+                    valid_sets=[val_data],
+                    callbacks=[lgb.early_stopping(stopping_rounds=10, verbose=False)]
+                )
+
+                preds = model.predict(X_val)
+                # 簡易的な評価指標としてログロスを使用（低いほど良い）
+                score = np.mean((preds - y_val) ** 2)
+                scores.append(score)
+
+            return np.mean(scores)
+
+        study = optuna.create_study(direction='minimize')
+        study.optimize(objective, n_trials=n_trials)
+
+        print("✨ 最適化が完了しました！最適パラメータ:")
+        print(study.best_params)
+
+        # 見つかった最適パラメータをベースにモデルの設定をアップデート
+        self.params.update(study.best_params)
+
+    def train(self, df: pd.DataFrame, feature_cols: list = None):
         """
-        未知のデータ（または予測対象データ）を入力し、勝率の予測確率を出力する
+        GroupKFold クロスバリデーションを用いて複数モデルを学習する（過学習防止）
         """
-        if self.model is None:
-            raise ValueError("モデルがまだ学習されていません。先に train() を実行してください。")
+        print("🚀 LightGBMモデルのクロスバリデーション学習を開始します...")
         
-        X = df[self.feature_cols]
-        preds = self.model.predict(X, num_iteration=self.model.best_iteration)
+        if feature_cols is None:
+            # デフォルトの特徴量リスト
+            feature_cols = [
+                'odds', 'weight', 'past_avg_rank', 'days_since_last_race',
+                'odds_zscore', 'weight_diff_from_avg', 'past_rank_in_race',
+                'is_nige', 'race_nige_count'
+            ]
+
+        X = df[feature_cols]
+        if 'target' in df.columns:
+            y = df['target']
+        elif 'finish_order' in df.columns:
+            y = (df['finish_order'] == 1).astype(int)
+        else:
+            raise ValueError("目的変数が見つかりません。")
+
+        groups = df['race_id'] if 'race_id' in df.columns else np.arange(len(df))
+
+        gkf = GroupKFold(n_splits=3)
+        self.models = []
+
+        for fold, (train_idx, val_idx) in enumerate(gkf.split(X, y, groups)):
+            X_train, X_val = X.iloc[train_idx], X.iloc[val_idx]
+            y_train, y_val = y.iloc[train_idx], y.iloc[val_idx]
+
+            train_data = lgb.Dataset(X_train, label=y_train)
+            val_data = lgb.Dataset(X_val, label=y_val, reference=train_data)
+
+            model = lgb.train(
+                self.params,
+                train_data,
+                num_boost_round=200,
+                valid_sets=[val_data],
+                callbacks=[lgb.early_stopping(stopping_rounds=10, verbose=False)]
+            )
+            self.models.append(model)
+
+        print(f"✅ {len(self.models)}個のモデルのクロスバリデーション学習が完了しました！")
+
+    def predict(self, df: pd.DataFrame, feature_cols: list = None) -> pd.DataFrame:
+        """
+        学習済み複数モデルの予測確率を平均化して出力する（アンサンブル効果で精度向上）
+        """
+        if feature_cols is None:
+            feature_cols = [
+                'odds', 'weight', 'past_avg_rank', 'days_since_last_race',
+                'odds_zscore', 'weight_diff_from_avg', 'past_rank_in_race',
+                'is_nige', 'race_nige_count'
+            ]
+
+        X = df[feature_cols]
         
+        # すべてのFoldモデルの予測を平均する
+        preds_list = [model.predict(X) for model in self.models]
+        avg_preds = np.mean(preds_list, axis=0)
+
         result_df = df.copy()
-        result_df['pred_win_prob'] = preds
+        result_df['pred_win_prob'] = avg_preds
         return result_df

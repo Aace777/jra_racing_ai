@@ -14,11 +14,19 @@ def run_pipeline_test():
     print("--- 2. 特徴量抽出 ---")
     extractor = FeatureExtractor(df)
     feature_df = extractor.generate_features()
+    feature_cols = extractor.get_feature_columns()
 
-    print("--- 3. 機械学習モデルの学習と予測 ---")
+    print("--- 3. 機械学習モデルの最適化・学習と予測 ---")
     model = JraModel()
-    model.train(feature_df)
-    pred_df = model.predict(feature_df)
+    
+    # Optunaによる過学習防止ハイパーパラメータ自動最適化
+    model.optimize_hyperparameters(feature_df, feature_cols, n_trials=10)
+    
+    # Cross Validationによる安全な学習
+    model.train(feature_df, feature_cols)
+    
+    # 予測
+    pred_df = model.predict(feature_df, feature_cols)
 
     print("--- 4. バックテスト（詳細シミュレーション） ---")
     backtester = JraBacktester(ev_threshold=1.0, max_bets_per_race=2, bet_amount_per_horse=100)
