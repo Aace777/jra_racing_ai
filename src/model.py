@@ -10,12 +10,15 @@ class JraModel:
     def __init__(self):
         self.model = None
         # 予測モデルの訓練に使う特徴量（カラム名）のリスト
+        # 特徴量として使用するカラムの定義をこれに合わせる
         self.feature_cols = [
-            'horse_weight', 
-            'weight_change', 
-            'weight_large_change_flag', 
-            'heavy_weight_flag', 
-            'market_implied_prob'
+            'odds',
+            'weight',
+            'past_avg_rank',
+            'days_since_last_race',
+            'odds_zscore',
+            'weight_diff_from_avg',
+            'past_rank_in_race'
         ]
 
     def train(self, df: pd.DataFrame):

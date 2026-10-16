@@ -1,53 +1,79 @@
 import pandas as pd
+import numpy as np
 
 class FeatureExtractor:
-    """
-    JRA-VAN公式データ（またはモック）から、AI予測用の強力な特徴量を生成するクラス。
-    """
-    def __init__(self, df: pd.DataFrame):
-        self.df = df.copy()
+    def __init__(self, df=None):
+        self.df = df
 
-    def generate_features(self) -> pd.DataFrame:
-        """すべての特徴量生成プロセスを順次実行するメインパイプライン"""
-        df = self.df
-        
-        # 1. 馬体重に関する特徴量
-        df = self._extract_weight_features(df)
-        
-        # 2. オッズから逆算した市場評価（確率）の特徴量
-        df = self._extract_market_features(df)
-        
-        # 3. 今後追加する高度な指標のプレースホルダー（例: タイム差やローテーション）
-        df = self._extract_stub_features(df)
-        
-        return df
-
-    def _extract_weight_features(self, df: pd.DataFrame) -> pd.DataFrame:
-        """馬体重の増減に関するフラグやトレンドを作成"""
-        if 'weight_change' in df.columns:
-            # 大幅な馬体重増減（±10kg以上）は激走や不調のサインになりやすい
-            df['weight_large_change_flag'] = df['weight_change'].apply(lambda x: 1 if abs(x) >= 10 else 0)
-            
-            # 馬体重そのものの絶対値（重馬場適性などのベースになる）
-            if 'horse_weight' in df.columns:
-                df['heavy_weight_flag'] = df['horse_weight'].apply(lambda x: 1 if x >= 500 else 0)
-                
-        return df
-
-    def _extract_market_features(self, df: pd.DataFrame) -> pd.DataFrame:
-        """オッズから市場の期待値を逆算する特徴量"""
-        if 'odds' in df.columns:
-            # オッズの逆数 = 簡易的な市場支持率（確率のベース）
-            df['market_implied_prob'] = 1 / df['odds']
-            
-            # 人気の極端さを表す対数変換などもここで可能
-        return df
-
-    def _extract_stub_features(self, df: pd.DataFrame) -> pd.DataFrame:
+    def extract_features(self, df: pd.DataFrame = None) -> pd.DataFrame:
         """
-        [将来拡張用] 
-        ここに「過去N走の平均着順」や「コース・距離別勝率」などを計算するロジックを追加していきます。
+        モックデータまたは本番データを入力として受け取り、
+        LightGBM用の高度な特徴量を追加したDataFrameを返す。
         """
-        # 現段階ではダミーとしてプレースホルダーを設置
-        df['is_ready_for_ml'] = 1
-        return df
+        if df is None:
+            df = self.df
+        
+        if df is None:
+            raise ValueError("DataFrameが渡されていません。")
+
+        # 元データを汚さないようにコピー
+        features = df.copy()
+
+        # 1. 基本的な数値化・欠損値処理（カラムが存在する場合のみ安全に処理）
+        if 'odds' in features.columns:
+            features['odds'] = pd.to_numeric(features['odds'], errors='coerce').fillna(1.0)
+        else:
+            features['odds'] = 1.0
+
+        if 'weight' in features.columns:
+            features['weight'] = pd.to_numeric(features['weight'], errors='coerce').fillna(450.0)
+        else:
+            features['weight'] = 450.0
+
+        # 2. 過去走集計の特徴量（モック用シミュレーション）
+        if 'past_avg_rank' not in features.columns:
+            features['past_avg_rank'] = np.random.uniform(1.0, 15.0, len(features))
+            
+        if 'days_since_last_race' not in features.columns:
+            features['days_since_last_race'] = np.random.randint(14, 180, len(features))
+
+        # 3. レース内相対化の特徴量（Zスコア・順位化）
+        if 'race_id' in features.columns:
+            features['odds_zscore'] = features.groupby('race_id')['odds'].transform(
+                lambda x: (x - x.mean()) / (x.std() + 1e-5)
+            )
+            features['weight_diff_from_avg'] = features.groupby('race_id')['weight'].transform(
+                lambda x: x - x.mean()
+            )
+            features['past_rank_in_race'] = features.groupby('race_id')['past_avg_rank'].transform(
+                lambda x: x.rank(ascending=True)
+            )
+        else:
+            features['odds_zscore'] = 0.0
+            features['weight_diff_from_avg'] = 0.0
+            features['past_rank_in_race'] = 1.0
+
+        # 4. カテゴリカル変数のエンコーディング準備
+        if 'jockey_id' in features.columns:
+            features['jockey_id'] = features['jockey_id'].astype('category')
+        if 'trainer_id' in features.columns:
+            features['trainer_id'] = features['trainer_id'].astype('category')
+
+        return features
+
+    def generate_features(self, df: pd.DataFrame = None) -> pd.DataFrame:
+        """extract_featuresへのエイリアス（互換用）"""
+        return self.extract_features(df)
+    def get_feature_columns(self) -> list:
+        """
+        LightGBMの学習に使用する特徴量カラム名のリストを返す
+        """
+        return [
+            'odds',
+            'weight',
+            'past_avg_rank',
+            'days_since_last_race',
+            'odds_zscore',
+            'weight_diff_from_avg',
+            'past_rank_in_race'
+        ]
