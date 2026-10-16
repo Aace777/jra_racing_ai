@@ -1,24 +1,30 @@
 import pandas as pd
-from pathlib import Path
+import numpy as np
 
-def generate_mock_csv():
-    raw_dir = Path("data/raw")
-    raw_dir.mkdir(parents=True, exist_ok=True)
-
-    mock_data = {
-        "race_id": ["202610010101", "202610010101", "202610010101", "202610010102"],
-        "date": ["2026-06-01", "2026-06-01", "2026-06-01", "2026-06-01"],
-        "horse_name": ["テイエムサンプル", "ダイワテスト", "オルフェコード", "ディープモック"],
-        "horse_weight": [510, 472, 490, 460],     # 510kgの馬を追加（重馬場フラグテスト用）
-        "weight_change": [12, -4, 2, -10],         # ±10kg以上の変化を追加
-        "odds": [2.5, 5.1, 12.4, 1.8],
-        "finish_order": [1, 2, 3, 1]
-    }
-
-    df = pd.DataFrame(mock_data)
-    target_path = raw_dir / "race_results.csv"
-    df.to_csv(target_path, index=False, encoding="utf-8-sig")
-    print(f"✅ リッチ化されたモックデータを作成しました: {target_path}")
+def create_mock_data():
+    np.random.seed(42)
+    n_samples = 40
+    
+    # 4レース分のモックデータ（1レースあたり10頭立て）
+    race_ids = [f"2026{i:02d}" for i in [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 
+                                        2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+                                        3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
+                                        4, 4, 4, 4, 4, 4, 4, 4, 4, 4]]
+    
+    styles = ['逃げ', '先行', '差し', '追込']
+    
+    df = pd.DataFrame({
+        'race_id': race_ids,
+        'horse_name': [f"馬_{i}" for i in range(n_samples)],
+        'odds': np.random.uniform(1.5, 30.0, n_samples),
+        'weight': np.random.uniform(400, 520, n_samples),
+        'running_style': np.random.choice(styles, n_samples),
+        'finish_order': np.random.randint(1, 11, n_samples), # 着順（1〜10位）を追加
+        'target': np.random.choice([0, 1], n_samples, p=[0.9, 0.1]) # 1着フラグ
+    })
+    
+    df.to_csv('mock_race_data.csv', index=False)
+    print("モックデータを更新しました（finish_order追加）！")
 
 if __name__ == "__main__":
-    generate_mock_csv()
+    create_mock_data()

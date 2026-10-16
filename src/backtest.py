@@ -1,69 +1,75 @@
 import pandas as pd
+import numpy as np
 
-class JraBacktester:
-    """
-    AIの予測勝率と実際のオッズから期待値を計算し、回収率をシミュレーションするクラス。
-    """
-    def __init__(self, threshold_ev: float = 1.0):
+class BacktestSimulator:
+    def __init__(self, ev_threshold=1.0, max_bets_per_race=2, bet_amount_per_horse=100):
         """
-        :param threshold_ev: 買うかどうかの基準となる期待値の閾値（例: 1.0以上なら購入）
+        高度な期待値フィルター＆資金配分バックテストシミュレーター
+        - ev_threshold: 購入する期待値の最低ライン
+        - max_bets_per_race: 1レースあたりの最大購入点数（トリガミ防止）
+        - bet_amount_per_horse: 1頭あたりの基本投資額（円）
         """
-        self.threshold_ev = threshold_ev
+        self.ev_threshold = ev_threshold
+        self.max_bets_per_race = max_bets_per_race
+        self.bet_amount_per_horse = bet_amount_per_horse
 
-    def calculate_expected_value(self, df: pd.DataFrame) -> pd.DataFrame:
+    def run(self, df: pd.DataFrame) -> dict:
         """
-        期待値 (EV) = 予測勝率 (pred_win_prob) × 単勝オッズ (odds) を計算する
+        予測確率とオッズから期待値を計算し、高度な絞り込みを行ってバックテストを実行する
         """
-        df = df.copy()
-        if 'pred_win_prob' not in df.columns or 'odds' not in df.columns:
-            raise ValueError("データに 'pred_win_prob' または 'odds' 列が含まれていません。")
+        results = df.copy()
 
-        # 期待値の計算
-        df['expected_value'] = df['pred_win_prob'] * df['odds']
+        # 1. 期待値（EV = 予測確率 × オッズ）の計算
+        if 'pred_win_prob' not in results.columns:
+            raise ValueError("予測確率カラム 'pred_win_prob' が存在しません。")
+        if 'odds' not in results.columns:
+            raise ValueError("オッズカラム 'odds' が存在しません。")
+
+        results['expected_value'] = results['pred_win_prob'] * results['odds']
+
+        # 2. 購入フラグの初期化
+        results['buy_flag'] = False
+
+        # 3. レースごとの購入点数制限・絞り込み処理（期待値上位N頭のみ購入）
+        for race_id, group in results.groupby('race_id'):
+            eligible = group[group['expected_value'] >= self.ev_threshold]
+            if not eligible.empty:
+                top_targets = eligible.sort_values(by='expected_value', ascending=False).head(self.max_bets_per_race)
+                results.loc[top_targets.index, 'buy_flag'] = True
+
+        # 4. 収支・払戻金の計算
+        if 'target' not in results.columns:
+            results['target'] = 0
+
+        results['investment'] = 0
+        results['payout'] = 0
+
+        bought_mask = results['buy_flag'] == True
+        results.loc[bought_mask, 'investment'] = self.bet_amount_per_horse
+
+        hit_and_bought = (results['buy_flag'] == True) & (results['target'] == 1)
+        results.loc[hit_and_bought, 'payout'] = results.loc[hit_and_bought, 'investment'] * results.loc[hit_and_bought, 'odds']
+
+        # 5. 全体サマリーの集計
+        total_bets = bought_mask.sum()
+        total_investment = results['investment'].sum()
+        total_payout = results['payout'].sum()
+        total_hits = hit_and_bought.sum()
         
-        # 期待値が閾値以上の場合に「購入フラグ」を立てる
-        df['buy_flag'] = df['expected_value'] >= self.threshold_ev
-        
-        return df
+        roi = (total_payout / total_investment * 100) if total_investment > 0 else 0.0
+        hit_rate = (total_hits / total_bets * 100) if total_bets > 0 else 0.0
 
-    def run_backtest(self, df: pd.DataFrame) -> dict:
-        """
-        バックテストを実行し、総投資額、回収額、回収率（ROI）を計算する
-        """
-        df_ev = self.calculate_expected_value(df)
-        
-        # 購入対象とした馬を抽出
-        bought_df = df_ev[df_ev['buy_flag'] == True]
-        
-        total_bets = len(bought_df)
-        if total_bets == 0:
-            return {
-                "total_bets": 0,
-                "total_investment": 0,
-                "total_return": 0,
-                "roi": 0.0,
-                "evaluated_df": df_ev
-            }
-
-        # 1点あたりの賭け金を 100円 と仮定
-        bet_amount = 100
-        total_investment = total_bets * bet_amount
-        
-        # 的中した場合の払戻金計算（finish_order == 1 が的中）
-        # ※簡易的に単勝馬券の回収をシミュレーション
-        total_return = 0
-        for _, row in bought_df.iterrows():
-            if row.get('finish_order') == 1:
-                total_return += bet_amount * row['odds']
-
-        # 回収率 (ROI: Return on Investment) の計算（%表示）
-        roi = (total_return / total_investment) * 100 if total_investment > 0 else 0.0
-
-        results = {
-            "total_bets": total_bets,
-            "total_investment": total_investment,
-            "total_return": total_return,
-            "roi": roi,
-            "evaluated_df": df_ev
+        summary = {
+            'total_bets': int(total_bets),
+            'total_hits': int(total_hits),
+            'total_investment': int(total_investment),
+            'total_payout': int(total_payout),
+            'roi': float(roi),
+            'hit_rate': float(hit_rate),
+            'details': results
         }
-        return results
+
+        return summary
+
+# 互換性のためのエイリアス定義（JraBacktesterという名前でも呼び出せるようにする）
+JraBacktester = BacktestSimulator

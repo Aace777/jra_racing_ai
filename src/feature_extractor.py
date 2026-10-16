@@ -6,10 +6,6 @@ class FeatureExtractor:
         self.df = df
 
     def extract_features(self, df: pd.DataFrame = None) -> pd.DataFrame:
-        """
-        モックデータまたは本番データを入力として受け取り、
-        LightGBM用の高度な特徴量を追加したDataFrameを返す。
-        """
         if df is None:
             df = self.df
         
@@ -19,7 +15,7 @@ class FeatureExtractor:
         # 元データを汚さないようにコピー
         features = df.copy()
 
-        # 1. 基本的な数値化・欠損値処理（カラムが存在する場合のみ安全に処理）
+        # 1. 基本的な数値化・欠損値処理
         if 'odds' in features.columns:
             features['odds'] = pd.to_numeric(features['odds'], errors='coerce').fillna(1.0)
         else:
@@ -53,20 +49,24 @@ class FeatureExtractor:
             features['weight_diff_from_avg'] = 0.0
             features['past_rank_in_race'] = 1.0
 
-        # 4. カテゴリカル変数のエンコーディング準備
-        if 'jockey_id' in features.columns:
-            features['jockey_id'] = features['jockey_id'].astype('category')
-        if 'trainer_id' in features.columns:
-            features['trainer_id'] = features['trainer_id'].astype('category')
+        # 4. 【追加】脚質・展開に関する特徴量
+        if 'running_style' in features.columns:
+            features['is_nige'] = (features['running_style'] == '逃げ').astype(int)
+            features['race_nige_count'] = features.groupby('race_id')['is_nige'].transform('sum')
+            features['running_style'] = features['running_style'].astype('category')
+        else:
+            features['is_nige'] = 0
+            features['race_nige_count'] = 1
 
         return features
 
     def generate_features(self, df: pd.DataFrame = None) -> pd.DataFrame:
         """extract_featuresへのエイリアス（互換用）"""
         return self.extract_features(df)
+
     def get_feature_columns(self) -> list:
         """
-        LightGBMの学習に使用する特徴量カラム名のリストを返す
+        LightGBMの学習に使用する特徴量カラム名のリスト
         """
         return [
             'odds',
@@ -75,5 +75,7 @@ class FeatureExtractor:
             'days_since_last_race',
             'odds_zscore',
             'weight_diff_from_avg',
-            'past_rank_in_race'
+            'past_rank_in_race',
+            'is_nige',
+            'race_nige_count'
         ]
